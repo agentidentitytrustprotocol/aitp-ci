@@ -1,0 +1,133 @@
+name: bump-spec-ref
+
+# Reusable: bump a pinned AITP-spec SHA and open a PR. Two modes:
+#
+#   mode: ref  (default) — the spec SHA is a `ref:` in a workflow file (the
+#              classic actions/checkout pin). Rewrites only the ref: that
+#              follows the spec-repo checkout line. Editing a file under
+#              .github/workflows/ needs the App's Workflows:write permission.
+#   mode: file — the spec SHA lives in a plain file (e.g. aitp-rs pins it in
+#              `tests/schemas/SPEC_VERSION`, read by ci.yml as `ref:`). Replaces
+#              the 40-hex SHA in that file. Needs only Contents:write.
+#
+# For repos that pin the spec by SHA for conformance (e.g. aitp-rs). Triggered
+# by a `spec-released` dispatch from the spec repo (or manually). The PR is
+# NEVER auto-merged — adopting a new spec is a deliberate review decision, and
+# the PR's own CI re-runs conformance against the new fixtures so the reviewer
+# sees whether this repo still conforms.
+#
+# Auth: the aitp-deps-bot App (org secrets AITP_BOT_APP_ID / AITP_BOT_PRIVATE_KEY).
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: 'ref (SHA is a workflow `ref:`) | file (SHA is the content of a plain file)'
+        required: false
+        type: string
+        default: ref
+      file:
+        description: 'File holding the pinned spec SHA (workflow file for ref mode; e.g. tests/schemas/SPEC_VERSION for file mode)'
+        required: false
+        type: string
+        default: .github/workflows/ci.yml
+      spec-repo:
+        required: false
+        type: string
+        default: agentidentitytrustprotocol/agentidentitytrustprotocol
+      sha:
+        description: 'Target spec SHA (blank = event payload, else spec HEAD)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AITP_BOT_APP_ID }}
+          private-key: ${{ secrets.AITP_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Resolve target + current spec SHA
+        id: v
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SPEC: ${{ inputs.spec-repo }}
+          FILE: ${{ inputs.file }}
+          MODE: ${{ inputs.mode }}
+          INSHA: ${{ inputs.sha }}
+          EVSHA: ${{ github.event.client_payload.sha }}
+        run: |
+          set -euo pipefail
+          SHA="${EVSHA:-$INSHA}"
+          [ -n "$SHA" ] || SHA=$(gh api "repos/$SPEC/commits/HEAD" --jq .sha)
+          if [ "$MODE" = "file" ]; then
+            # The pin file contains just the 40-hex SHA (possibly among other text).
+            CUR=$(grep -oE '[0-9a-f]{40}' "$FILE" | head -1 || true)
+          else
+            CUR=$(awk -v s="$SPEC" 'index($0,"repository: "s){f=1} f&&match($0,/[0-9a-f]{40}/){print substr($0,RSTART,RLENGTH);exit}' "$FILE")
+          fi
+          echo "sha=$SHA"                  >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:7}"          >> "$GITHUB_OUTPUT"
+          echo "cur=$CUR"                  >> "$GITHUB_OUTPUT"
+          echo "branch=deps/spec-${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          if [ "$SHA" = "$CUR" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Spec ref already at $SHA."; else echo "changed=true" >> "$GITHUB_OUTPUT"; echo "spec ${CUR:-none} -> $SHA"; fi
+
+      - name: Branch already open?
+        if: ${{ steps.v.outputs.changed == 'true' }}
+        id: br
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "${{ steps.v.outputs.branch }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Rewrite the pinned ref
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          SPEC: ${{ inputs.spec-repo }}
+          SHA: ${{ steps.v.outputs.sha }}
+          FILE: ${{ inputs.file }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "file" ]; then
+            # Replace the (first) 40-hex SHA anywhere in the pin file.
+            SHA="$SHA" perl -0777 -i -pe 's/[0-9a-f]{40}/$ENV{SHA}/' "$FILE"
+          else
+            # Replace only the ref: that follows the spec-repo checkout line.
+            SPEC="$SPEC" SHA="$SHA" perl -0777 -i -pe '
+              my $spec = quotemeta($ENV{SPEC}); my $sha = $ENV{SHA};
+              s/(repository:\s*$spec.*?ref:\s*)[0-9a-f]{7,40}/$1$sha/s;
+            ' "$FILE"
+          fi
+
+      - name: Open PR (held for review — never auto-merged)
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BR: ${{ steps.v.outputs.branch }}
+          SHA: ${{ steps.v.outputs.sha }}
+          SHORT: ${{ steps.v.outputs.short }}
+          CUR: ${{ steps.v.outputs.cur }}
+          SPEC: ${{ inputs.spec-repo }}
+          FILE: ${{ inputs.file }}
+        run: |
+          set -euo pipefail
+          git config user.name 'aitp-deps-bot[bot]'
+          git config user.email '${{ steps.app.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git checkout -b "$BR"
+          git add -A
+          git commit -m "chore(spec): bump pinned AITP spec ref to $SHORT"
+          git push -u origin "$BR"
+          gh pr create --base "$GITHUB_REF_NAME" --head "$BR" \
+            --title "chore(spec): adopt AITP spec @ $SHORT" \
+            --body "Bumps the pinned spec ref (\`$(printf %.7s "$CUR")\` → \`$SHORT\`) in \`$FILE\`. Conformance CI re-runs against the new fixtures on this PR — **review the result and merge deliberately**; the pin exists so spec changes never silently alter CI. https://github.com/$SPEC/commit/$SHA"

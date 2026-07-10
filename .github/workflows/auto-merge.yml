@@ -1,0 +1,46 @@
+name: auto-merge
+
+# Reusable auto-merge for Dependabot PRs across every aitp-* repo.
+# Arms GitHub's native auto-merge once branch-protection's required checks pass
+# — it does NOT bypass CI. Policy: patch + minor merge unattended; a major bump
+# opens the PR but waits for a human (a green build is not sufficient signal to
+# ship a breaking change in a protocol/crypto stack). A caller may set
+# allow-major: true to opt out of the hold.
+#
+# Convention: third-party actions are SHA-pinned (matching aitp-rs); first-party
+# actions/* are trusted by major tag.
+#
+# Each repo calls this with a 6-line thin workflow:
+#   on: pull_request
+#   permissions: { contents: write, pull-requests: write }
+#   jobs:
+#     call:
+#       uses: agentidentitytrustprotocol/aitp-ci/.github/workflows/auto-merge.yml@v1
+
+on:
+  workflow_call:
+    inputs:
+      allow-major:
+        description: 'Arm auto-merge even on a major bump'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Enable auto-merge (patch & minor; majors held)
+        if: ${{ inputs.allow-major || steps.meta.outputs.update-type == 'version-update:semver-patch' || steps.meta.outputs.update-type == 'version-update:semver-minor' }}
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,197 @@
+name: bump-consume
+
+# Reusable "consume a new aitp SDK release" for every consumer repo.
+# Called by a thin bump-aitp.yml (repository_dispatch: aitp-released +
+# workflow_dispatch). It resolves the target version, waits for the registry to
+# actually serve it, edits the manifest + lockfile for the given ecosystem,
+# opens a bump PR, and — for a non-breaking bump — arms auto-merge.
+#
+# Auth: the aitp-deps-bot GitHub App (org secrets AITP_BOT_APP_ID /
+# AITP_BOT_PRIVATE_KEY). Installation tokens trigger CI on the bot PR (which
+# GITHUB_TOKEN cannot) and never expire — so there are no PATs anywhere.
+#
+# Caller shape:
+#   on:
+#     repository_dispatch: { types: [aitp-released] }
+#     workflow_dispatch:   { inputs: { version: { required: false, default: '' } } }
+#   jobs:
+#     bump:
+#       uses: agentidentitytrustprotocol/aitp-ci/.github/workflows/bump-consume.yml@v1
+#       with:  { ecosystem: npm, package: '@agentidentitytrustprotocol/aitp' }
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      ecosystem:
+        description: 'npm | cargo | uv'
+        required: true
+        type: string
+      package:
+        description: 'SDK package name as it appears in this repo''s manifest'
+        required: false
+        type: string
+        default: aitp
+      version:
+        description: 'Explicit version (manual dispatch); blank = event payload or latest'
+        required: false
+        type: string
+        default: ''
+      allow-major:
+        description: 'Arm auto-merge even on a major bump'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AITP_BOT_APP_ID }}
+          private-key: ${{ secrets.AITP_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.ecosystem == 'npm' }}
+        with:
+          node-version: '22'
+
+      - name: Resolve versions
+        id: v
+        env:
+          ECO: ${{ inputs.ecosystem }}
+          PKG: ${{ inputs.package }}
+          MANUAL: ${{ inputs.version }}
+          EVENT: ${{ github.event.client_payload.version }}
+        run: |
+          set -euo pipefail
+          TARGET="${EVENT:-$MANUAL}"
+          if [ -z "$TARGET" ]; then
+            case "$ECO" in
+              npm)   TARGET=$(npm view "$PKG" version) ;;
+              cargo) TARGET=$(curl -fsSL -A 'aitp-ci-bump' "https://crates.io/api/v1/crates/$PKG" | jq -r '.crate.max_stable_version') ;;
+              uv)    TARGET=$(curl -fsSL "https://pypi.org/pypi/$PKG/json"       | jq -r '.info.version') ;;
+              *) echo "::error::unknown ecosystem $ECO"; exit 1 ;;
+            esac
+          fi
+          TARGET="${TARGET#v}"
+          case "$ECO" in
+            npm)   CURRENT=$(node -e "const l=require('./package-lock.json').packages;const p=l['node_modules/'+process.env.PKG]||l['node_modules/'+process.env.PKG.split('/').pop()];process.stdout.write(p?p.version:'')" ) ;;
+            cargo) CURRENT=$(awk -v p="$PKG" '$0=="name = \""p"\""{f=1} f&&/^version = /{v=$0;sub(/^version = "/,"",v);sub(/"$/,"",v);print v;exit}' Cargo.lock) ;;
+            uv)    CURRENT=$(awk -v p="$PKG" '$0=="name = \""p"\""{f=1} f&&/^version = /{v=$0;sub(/^version = "/,"",v);sub(/"$/,"",v);print v;exit}' uv.lock) ;;
+          esac
+          echo "target=$TARGET"   >> "$GITHUB_OUTPUT"
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "branch=deps/aitp-$TARGET" >> "$GITHUB_OUTPUT"
+          # major-ish for 0.x = a minor change; otherwise a major change
+          major() { echo "${1%%.*}"; }; minor() { echo "$1" | cut -d. -f2; }
+          BREAKING=false
+          if [ "$(major "$TARGET")" != "$(major "$CURRENT")" ]; then BREAKING=true
+          elif [ "$(major "$TARGET")" = "0" ] && [ "$(minor "$TARGET")" != "$(minor "$CURRENT")" ]; then BREAKING=true; fi
+          echo "breaking=$BREAKING" >> "$GITHUB_OUTPUT"
+          if [ "$CURRENT" = "$TARGET" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Already at $TARGET."; else echo "changed=true" >> "$GITHUB_OUTPUT"; echo "$PKG $CURRENT -> $TARGET (breaking=$BREAKING)"; fi
+
+      - name: Branch already open?
+        if: ${{ steps.v.outputs.changed == 'true' }}
+        id: br
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "${{ steps.v.outputs.branch }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"; echo "PR branch already exists."
+          else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Wait for registry to serve the version
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          ECO: ${{ inputs.ecosystem }}
+          PKG: ${{ inputs.package }}
+          T: ${{ steps.v.outputs.target }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            case "$ECO" in
+              npm)   [ "$(npm view "$PKG@$T" version 2>/dev/null || true)" = "$T" ] && { echo ok; exit 0; } ;;
+              cargo) curl -fsSL -A 'aitp-ci-bump' "https://crates.io/api/v1/crates/$PKG/$T" >/dev/null 2>&1 && { echo ok; exit 0; } ;;
+              uv)    curl -fsSL "https://pypi.org/pypi/$PKG/$T/json"       >/dev/null 2>&1 && { echo ok; exit 0; } ;;
+            esac
+            echo "waiting for $PKG@$T ($i/24)…"; sleep 5
+          done
+          echo "::error::$PKG@$T not on the registry after ~2 min"; exit 1
+
+      - name: Apply bump (manifest + lockfile)
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          ECO: ${{ inputs.ecosystem }}
+          PKG: ${{ inputs.package }}
+          T: ${{ steps.v.outputs.target }}
+        run: |
+          set -euo pipefail
+          case "$ECO" in
+            npm)
+              # Rewrite every dependency entry that points at PKG — covers both
+              # the real name and any `npm:PKG@…` alias — then re-lock.
+              node -e '
+                const fs=require("fs"), pkg=process.env.PKG, T=process.env.T;
+                const j=JSON.parse(fs.readFileSync("package.json","utf8"));
+                for (const sec of ["dependencies","devDependencies","optionalDependencies"]) {
+                  const d=j[sec]; if(!d) continue;
+                  for (const k of Object.keys(d)) {
+                    if (k===pkg) d[k]="^"+T;
+                    else if (typeof d[k]==="string" && d[k].startsWith("npm:"+pkg+"@")) d[k]="npm:"+pkg+"@^"+T;
+                  }
+                }
+                fs.writeFileSync("package.json", JSON.stringify(j,null,2)+"\n");
+              '
+              npm install --package-lock-only ;;
+            cargo)
+              command -v cargo >/dev/null || { curl -fsSL --proto "=https" --tlsv1.2 https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1; }
+              source "$HOME/.cargo/env" 2>/dev/null || true
+              # Bump the version requirement in Cargo.toml in place — preserving
+              # features / table form, handling [dependencies] and
+              # [workspace.dependencies] — then re-lock. `cargo add` can't target
+              # a virtual workspace, and won't survive a featured table cleanly.
+              PKG="$PKG" T="$T" perl -i -pe '
+                my $p = quotemeta($ENV{PKG}); my $v = $ENV{T};
+                if (/^\s*$p\s*=/) {
+                  if (/\{/) { s/(version\s*=\s*")[^"]+(")/$1$v$2/ }
+                  else      { s/=\s*"[^"]+"/= "$v"/ }
+                }
+              ' Cargo.toml
+              cargo update -p "$PKG" --precise "$T" ;;
+            uv)
+              curl -fsSL https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+              export PATH="$HOME/.local/bin:$PATH"
+              uv lock --upgrade-package "$PKG" ;;
+          esac
+
+      - name: Open PR + arm auto-merge
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BR: ${{ steps.v.outputs.branch }}
+          CUR: ${{ steps.v.outputs.current }}
+          T: ${{ steps.v.outputs.target }}
+          BREAKING: ${{ steps.v.outputs.breaking }}
+          ALLOW_MAJOR: ${{ inputs.allow-major }}
+        run: |
+          set -euo pipefail
+          git config user.name 'aitp-deps-bot[bot]'
+          git config user.email '${{ steps.app.outputs.app-slug }}[bot]@users.noreply.github.com'
+          git checkout -b "$BR"
+          git add -A
+          git commit -m "chore(deps): bump aitp to $T"
+          git push -u origin "$BR"
+          NOTE=""; [ "$BREAKING" = "true" ] && NOTE=$'\n\n> ⚠️ **Breaking bump held** — auto-merge is NOT armed; review and merge manually.'
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$BR" \
+            --title "chore(deps): bump aitp to $T" \
+            --body "Event-driven bump of \`aitp\` $CUR → $T, dispatched on publish.$NOTE"
+          if [ "$ALLOW_MAJOR" = "true" ] || [ "$BREAKING" = "false" ]; then
+            gh pr merge --auto --squash "$BR"
+          fi
