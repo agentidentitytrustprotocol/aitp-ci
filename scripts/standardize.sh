@@ -21,7 +21,7 @@
 set -euo pipefail
 
 ORG=agentidentitytrustprotocol
-ALL_REPOS="aitp-control-plane aitp-playground aitp-verifier-py aitp-ui-console aitp-website agentidentitytrustprotocol"
+ALL_REPOS="aitp-control-plane aitp-playground aitp-verifier-py aitp-verifier-ts aitp-ui-console aitp-website agentidentitytrustprotocol"
 
 # Emits one required check-name per line for the given repo (non-zero if unknown).
 checks_for() {
@@ -32,6 +32,8 @@ checks_for() {
       printf '%s\n' "Lint (ruff)" "Tests (Python 3.11)" "Tests (Python 3.13)" "Integration (agent subprocess e2e)" ;;
     aitp-verifier-py)
       printf '%s\n' "conformance + tests + types (3.11)" "conformance + tests + types (3.12)" "conformance + tests + types (3.13)" ;;
+    aitp-verifier-ts)
+      printf '%s\n' "spec pin + generated files" "tests (node 20)" "tests (node 22)" "tests (deno)" "conformance (aitp-conformance)" "mint (aitp-rs) -> verify" "build aitp-rs tools" ;;
     aitp-ui-console)
       printf '%s\n' "typecheck · lint · test · build" ;;
     aitp-website)

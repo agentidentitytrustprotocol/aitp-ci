@@ -10,7 +10,7 @@ repo stays uniform instead of drifting.
 |---|---|
 | [`.github/workflows/auto-merge.yml`](.github/workflows/auto-merge.yml) | Auto-merge Dependabot PRs once required checks pass. Patch + minor unattended; **majors held** for review. |
 | [`.github/workflows/bump-consume.yml`](.github/workflows/bump-consume.yml) | Consume a new `aitp` SDK release: resolve → wait for registry → bump manifest + lockfile → PR → arm auto-merge. Ecosystems: `npm`, `cargo`, `uv`. |
-| [`.github/workflows/bump-spec-ref.yml`](.github/workflows/bump-spec-ref.yml) | Bump a pinned spec SHA (in a workflow `ref:` — `mode: ref`, or a plain pin file like `tests/schemas/SPEC_VERSION` — `mode: file`) and open a **held** PR. |
+| [`.github/workflows/bump-spec-ref.yml`](.github/workflows/bump-spec-ref.yml) | Bump a pinned spec SHA (in a workflow `ref:` — `mode: ref`, or a plain pin file like `tests/schemas/SPEC_VERSION` — `mode: file`) and open a **held** PR. `label` names the pin (default `spec`); `post-bump` regenerates derived files before the commit. |
 
 | Script | Purpose |
 |---|---|

@@ -33,9 +33,12 @@ The consumer's `bump-aitp.yml` calls `bump-consume.yml`. Dependabot's weekly
 Leaves — standardized (CI + auto-merge + Dependabot) but no SDK dependency, so
 no `bump-aitp`:
 
-- **aitp-verifier-py** — independent second implementation of the verification
-  core (for spec Final promotion). Its independence from `aitp-rs` is the point.
-  It tracks the spec on `main` (floating), so nothing to SHA-bump today.
+- **aitp-verifier-py**, **aitp-verifier-ts** — independent implementations of
+  the verification core (for spec Final promotion). Their independence from
+  `aitp-rs` is the point. Each pins the spec in a `SPEC_VERSION` file and
+  bumps it with `bump-spec-ref` like aitp-rs. aitp-verifier-ts also pins the
+  aitp-rs conformance runner it tests under, bumped by the same workflow with
+  `label: aitp-rs`.
 - **aitp-ui-console**, **aitp-website** — Vercel deploys.
 
 ## Propagation mechanics
@@ -64,8 +67,8 @@ Dependabot safety net.
 
 The spec (`agentidentitytrustprotocol`) is a **dependency pinned by git SHA**.
 `aitp-rs` pins it in **`tests/schemas/SPEC_VERSION`** (a plain file, read by
-`ci.yml` as `ref:`) — not in a workflow file. `aitp-verifier-py` tracks the
-default branch, so there is nothing to bump there.
+`ci.yml` as `ref:`) — not in a workflow file. `aitp-verifier-py` and
+`aitp-verifier-ts` pin it in a root `SPEC_VERSION` file the same way.
 
 1. On a conformance-relevant push (`schemas/**`, `docs/**`, `rfcs/**`,
    `registries/**`), the spec repo's `notify-spec-consumers.yml` dispatches
@@ -75,6 +78,9 @@ default branch, so there is nothing to bump there.
    and opens a PR that is **never auto-merged** — the PR's own conformance CI
    runs against the new fixtures, and a human adopts the new spec deliberately
    (the pin exists precisely so spec changes never silently alter CI).
+   A pinner whose generated files derive from the spec passes `post-bump`, a
+   shell command run after the rewrite and before the commit, so the PR lands
+   with those files already regenerated.
 
 ## Merge policy
 
@@ -138,7 +144,8 @@ only Contents + Pull requests.
 | aitp-rs | Rust | own ci | ✅ | ✅ (SHA pin in file) | — | crate+npm+py+wasm | **hub / sends 2 dispatches** |
 | aitp-control-plane | npm | own ci | ✅ | npm+ga | npm | Docker→GHCR | consumes npm |
 | aitp-playground | Python/uv | own ci | ✅ | uv+ga | uv (`aitp-sdk`) | Docker→GHCR | consumes py |
-| aitp-verifier-py | Python | own ci | ✅ | pip+ga | — | — | independent |
+| aitp-verifier-py | Python | own ci | ✅ | pip+ga | — | PyPI | independent |
+| aitp-verifier-ts | TS | own ci | ✅ | npm+ga | — | npm | independent |
 | aitp-ui-console | TS | own ci | ✅ | npm+ga | — | Vercel | leaf |
 | aitp-website | MDX | own ci | ✅ | npm+ga | — | Vercel | leaf |
 | agentidentitytrustprotocol | Spec | own ci | ✅ | ga | — | release zip | **spec source / sends spec-released** |
