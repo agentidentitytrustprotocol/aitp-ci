@@ -16,6 +16,11 @@ name: bump-spec-ref
 # the PR's own CI re-runs conformance against the new fixtures so the reviewer
 # sees whether this repo still conforms.
 #
+# `label` names the pinned thing in the PR title, branch and commit (default
+# `spec`; e.g. `aitp-rs` when the same workflow bumps an aitp-rs pin).
+# `post-bump` is an optional shell command run after the pin is rewritten and
+# before the commit, for repos whose generated files derive from the pin.
+#
 # Auth: the aitp-deps-bot App (org secrets AITP_BOT_APP_ID / AITP_BOT_PRIVATE_KEY).
 
 on:
@@ -37,6 +42,16 @@ on:
         default: agentidentitytrustprotocol/agentidentitytrustprotocol
       sha:
         description: 'Target spec SHA (blank = event payload, else spec HEAD)'
+        required: false
+        type: string
+        default: ''
+      label:
+        description: 'Name of the pinned thing in the PR title, branch and commit'
+        required: false
+        type: string
+        default: spec
+      post-bump:
+        description: 'Shell command run after the pin is rewritten, before the commit (blank = none)'
         required: false
         type: string
         default: ''
@@ -64,6 +79,7 @@ jobs:
           FILE: ${{ inputs.file }}
           MODE: ${{ inputs.mode }}
           INSHA: ${{ inputs.sha }}
+          LABEL: ${{ inputs.label }}
           EVSHA: ${{ github.event.client_payload.sha }}
         run: |
           set -euo pipefail
@@ -78,8 +94,8 @@ jobs:
           echo "sha=$SHA"                  >> "$GITHUB_OUTPUT"
           echo "short=${SHA:0:7}"          >> "$GITHUB_OUTPUT"
           echo "cur=$CUR"                  >> "$GITHUB_OUTPUT"
-          echo "branch=deps/spec-${SHA:0:12}" >> "$GITHUB_OUTPUT"
-          if [ "$SHA" = "$CUR" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; echo "Spec ref already at $SHA."; else echo "changed=true" >> "$GITHUB_OUTPUT"; echo "spec ${CUR:-none} -> $SHA"; fi
+          echo "branch=deps/${LABEL}-${SHA:0:12}" >> "$GITHUB_OUTPUT"
+          if [ "$SHA" = "$CUR" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; echo "$LABEL ref already at $SHA."; else echo "changed=true" >> "$GITHUB_OUTPUT"; echo "$LABEL ${CUR:-none} -> $SHA"; fi
 
       - name: Branch already open?
         if: ${{ steps.v.outputs.changed == 'true' }}
@@ -110,6 +126,14 @@ jobs:
             ' "$FILE"
           fi
 
+      - name: Post-bump command
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' && inputs.post-bump != '' }}
+        env:
+          POST_BUMP: ${{ inputs.post-bump }}
+        run: |
+          set -euo pipefail
+          bash -euo pipefail -c "$POST_BUMP"
+
       - name: Open PR (held for review — never auto-merged)
         if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
         env:
@@ -120,14 +144,15 @@ jobs:
           CUR: ${{ steps.v.outputs.cur }}
           SPEC: ${{ inputs.spec-repo }}
           FILE: ${{ inputs.file }}
+          LABEL: ${{ inputs.label }}
         run: |
           set -euo pipefail
           git config user.name 'aitp-deps-bot[bot]'
           git config user.email '${{ steps.app.outputs.app-slug }}[bot]@users.noreply.github.com'
           git checkout -b "$BR"
           git add -A
-          git commit -m "chore(spec): bump pinned AITP spec ref to $SHORT"
+          git commit -m "chore($LABEL): bump pinned $LABEL ref to $SHORT"
           git push -u origin "$BR"
           gh pr create --base "$GITHUB_REF_NAME" --head "$BR" \
-            --title "chore(spec): adopt AITP spec @ $SHORT" \
-            --body "Bumps the pinned spec ref (\`$(printf %.7s "$CUR")\` → \`$SHORT\`) in \`$FILE\`. Conformance CI re-runs against the new fixtures on this PR — **review the result and merge deliberately**; the pin exists so spec changes never silently alter CI. https://github.com/$SPEC/commit/$SHA"
+            --title "chore($LABEL): adopt $LABEL @ $SHORT" \
+            --body "Bumps the pinned $LABEL ref (\`$(printf %.7s "$CUR")\` → \`$SHORT\`) in \`$FILE\`. Conformance CI re-runs against the new fixtures on this PR — **review the result and merge deliberately**; the pin exists so upstream changes never silently alter CI. https://github.com/$SPEC/commit/$SHA"
