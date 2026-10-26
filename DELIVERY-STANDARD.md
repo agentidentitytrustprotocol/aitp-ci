@@ -81,6 +81,9 @@ The spec (`agentidentitytrustprotocol`) is a **dependency pinned by git SHA**.
    A pinner whose generated files derive from the spec passes `post-bump`, a
    shell command run after the rewrite and before the commit, so the PR lands
    with those files already regenerated.
+   Opening a bump PR closes the older open bump PRs for the same `label` whose
+   SHA the new one contains, so only the newest stays open. A bump PR for a
+   commit that is not behind the new SHA stays open.
 
 ## Merge policy
 

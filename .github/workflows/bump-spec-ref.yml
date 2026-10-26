@@ -156,3 +156,30 @@ jobs:
           gh pr create --base "$GITHUB_REF_NAME" --head "$BR" \
             --title "chore($LABEL): adopt $LABEL @ $SHORT" \
             --body "Bumps the pinned $LABEL ref (\`$(printf %.7s "$CUR")\` → \`$SHORT\`) in \`$FILE\`. Conformance CI re-runs against the new fixtures on this PR — **review the result and merge deliberately**; the pin exists so upstream changes never silently alter CI. https://github.com/$SPEC/commit/$SHA"
+
+      - name: Close the bump PRs this one supersedes
+        if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BR: ${{ steps.v.outputs.branch }}
+          SHA: ${{ steps.v.outputs.sha }}
+          SPEC: ${{ inputs.spec-repo }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          NEW=$(gh pr view "$BR" --json number --jq .number)
+          # Only bot-opened deps/<label>-<sha> PRs whose SHA the new one contains;
+          # a PR for a commit not behind the new SHA (out-of-order dispatch, a
+          # different branch) is left open.
+          gh pr list --state open --limit 200 --json number,headRefName,author \
+            --jq ".[] | select(.author.is_bot) | select(.headRefName | startswith(\"deps/${LABEL}-\")) | select(.headRefName != \"$BR\") | \"\(.number) \(.headRefName)\"" |
+          while read -r N HEAD; do
+            OLD=${HEAD#"deps/${LABEL}-"}
+            STATUS=$(gh api "repos/$SPEC/compare/$OLD...$SHA" --jq .status 2>/dev/null || echo unknown)
+            if [ "$STATUS" = "ahead" ]; then
+              gh pr close "$N" --delete-branch --comment "Superseded by #$NEW, which pins a later $LABEL commit that includes this one."
+              echo "closed #$N ($OLD)"
+            else
+              echo "kept #$N ($OLD): compare status $STATUS"
+            fi
+          done
