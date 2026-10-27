@@ -33,12 +33,14 @@ The consumer's `bump-aitp.yml` calls `bump-consume.yml`. Dependabot's weekly
 Leaves — standardized (CI + auto-merge + Dependabot) but no SDK dependency, so
 no `bump-aitp`:
 
-- **aitp-verifier-py**, **aitp-verifier-ts** — independent implementations of
-  the verification core (for spec Final promotion). Their independence from
-  `aitp-rs` is the point. Each pins the spec in a `SPEC_VERSION` file and
-  bumps it with `bump-spec-ref` like aitp-rs. aitp-verifier-ts also pins the
-  aitp-rs conformance runner it tests under, bumped by the same workflow with
-  `label: aitp-rs`.
+- **aitp-verifier-py**, **aitp-verifier-ts**, **aitp-verifier-go** —
+  independent implementations of the verification core (for spec Final
+  promotion). Their independence from `aitp-rs` is the point (independent in
+  code; all share one author, so none meets the v1.0 different-authorship
+  criterion). Each pins the spec in a `SPEC_VERSION` file and bumps it with
+  `bump-spec-ref` like aitp-rs. aitp-verifier-ts and aitp-verifier-go also pin
+  the aitp-rs conformance runner they test under (`AITP_RS_COMMIT`), bumped by
+  the same workflow with `label: aitp-rs`.
 - **aitp-ui-console**, **aitp-website** — Vercel deploys.
 
 ## Propagation mechanics
@@ -67,8 +69,9 @@ Dependabot safety net.
 
 The spec (`agentidentitytrustprotocol`) is a **dependency pinned by git SHA**.
 `aitp-rs` pins it in **`tests/schemas/SPEC_VERSION`** (a plain file, read by
-`ci.yml` as `ref:`) — not in a workflow file. `aitp-verifier-py` and
-`aitp-verifier-ts` pin it in a root `SPEC_VERSION` file the same way.
+`ci.yml` as `ref:`) — not in a workflow file. `aitp-verifier-py`,
+`aitp-verifier-ts` and `aitp-verifier-go` pin it in a root `SPEC_VERSION` file
+the same way, and `aitp-docs` pins it in `sources.config.json`.
 
 1. On a conformance-relevant push (`schemas/**`, `docs/**`, `rfcs/**`,
    `registries/**`), the spec repo's `notify-spec-consumers.yml` dispatches
@@ -121,6 +124,31 @@ The jobs satisfying this bar are the **required status checks** on `main`
 auto-merge never overrides it. `aitp-rs` exceeds the baseline and keeps its own
 richer protection (not clobbered by `standardize.sh`).
 
+`scripts/standardize.sh --check` is the read-only audit: it compares every
+repo's live settings and protection (auto-merge, squash, delete-branch, the
+exact required-check set, `strict: true`, no admin enforcement, no required
+reviews) with `checks_for()` and exits non-zero on any drift. Run it after any
+CI job rename; a required check whose job was renamed hangs every PR.
+
+### Go (aitp-verifier-go)
+
+The Go baseline, all in `ci.yml`:
+
+- **Format** — `gofmt -l .` must print nothing.
+- **Lint** — `go vet ./...` and staticcheck (run with `go run …@version` as a
+  CI tool, never a module dependency).
+- **Supply chain** — govulncheck, and the **no-deps rule**: `go list -m all`
+  must list only the module itself (JCS, strict JSON and JWS are hand-written).
+- **Tests + coverage gate** — `go test` on the floor and current Go (1.26,
+  1.27), with coverage of `internal/` gated at ≥ 85%.
+- **Conformance** — the adapter under `aitp-conformance` (core: no failed or
+  skipped fixture) and an aitp-rs mint → Go verify cross-check.
+
+Required checks: `spec pin + generated files`, `tests (go 1.26)`,
+`tests (go 1.27)`, `build aitp-rs tools`, `conformance (aitp-conformance)`,
+`mint (aitp-rs) -> verify`. Publishing is the tag: the Go module proxy serves
+`vX.Y.Z` tags, so there is no registry credential.
+
 ## Credentials
 
 One GitHub App (`aitp-deps-bot`, App ID 4261763), installed org-wide, key stored
@@ -149,6 +177,7 @@ only Contents + Pull requests.
 | aitp-playground | Python/uv | own ci | ✅ | uv+ga | uv (`aitp-sdk`) | Docker→GHCR | consumes py |
 | aitp-verifier-py | Python | own ci | ✅ | pip+ga | — | PyPI | independent |
 | aitp-verifier-ts | TS | own ci | ✅ | npm+ga | — | npm | independent |
+| aitp-verifier-go | Go | own ci | ✅ | ga (no deps) | — | Go module proxy (tag) | independent |
 | aitp-ui-console | TS | own ci | ✅ | npm+ga | — | Vercel | leaf |
 | aitp-website | MDX | own ci | ✅ | npm+ga | — | Vercel | leaf |
 | agentidentitytrustprotocol | Spec | own ci | ✅ | ga | — | release zip | **spec source / sends spec-released** |
