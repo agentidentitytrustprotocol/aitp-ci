@@ -63,6 +63,12 @@ jobs:
         with:
           node-version: '22'
 
+      # Node 22 ships npm 10, which writes no `libc` field into the lockfile and
+      # so strips it from every entry on re-lock. npm writes it from 11.12.
+      - name: Use npm 11
+        if: ${{ inputs.ecosystem == 'npm' }}
+        run: npm install -g 'npm@^11.12' && npm -v
+
       - name: Resolve versions
         id: v
         env:
@@ -115,15 +121,26 @@ jobs:
           T: ${{ steps.v.outputs.target }}
         run: |
           set -euo pipefail
+          # npm: the SDK and every optional platform package it pins. They are
+          # published one by one, and a re-lock that runs before one is served
+          # drops it from the lockfile without an error.
+          npm_served() {
+            [ "$(npm view "$PKG@$T" version 2>/dev/null || true)" = "$T" ] || return 1
+            npm view "$PKG@$T" optionalDependencies --json \
+              | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{for(const[n,v]of Object.entries(JSON.parse(s||"{}")))console.log(n+"@"+v)})' \
+              | while read -r dep; do
+                  [ "$(npm view "$dep" version 2>/dev/null || true)" = "${dep##*@}" ] || { echo "  $dep not served yet"; exit 1; }
+                done
+          }
           for i in $(seq 1 24); do
             case "$ECO" in
-              npm)   [ "$(npm view "$PKG@$T" version 2>/dev/null || true)" = "$T" ] && { echo ok; exit 0; } ;;
+              npm)   npm_served && { echo ok; exit 0; } ;;
               cargo) curl -fsSL -A 'aitp-ci-bump' "https://crates.io/api/v1/crates/$PKG/$T" >/dev/null 2>&1 && { echo ok; exit 0; } ;;
               uv)    curl -fsSL "https://pypi.org/pypi/$PKG/$T/json"       >/dev/null 2>&1 && { echo ok; exit 0; } ;;
             esac
             echo "waiting for $PKG@$T ($i/24)…"; sleep 5
           done
-          echo "::error::$PKG@$T not on the registry after ~2 min"; exit 1
+          echo "::error::$PKG@$T (for npm, with its platform packages) not on the registry after ~2 min"; exit 1
 
       - name: Apply bump (manifest + lockfile)
         if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
@@ -170,6 +187,56 @@ jobs:
               export PATH="$HOME/.local/bin:$PATH"
               uv lock --upgrade-package "$PKG" ;;
           esac
+
+      # The lockfile must pin every optional platform package of PKG@T with the
+      # os/cpu/libc fields it was published with, whatever platform this runner
+      # is. Without them `npm ci` on another platform has no native addon.
+      - name: Verify platform packages in the lockfile
+        if: ${{ inputs.ecosystem == 'npm' && steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
+        env:
+          PKG: ${{ inputs.package }}
+          T: ${{ steps.v.outputs.target }}
+        run: |
+          # shellcheck disable=SC2016  # JS template literals, not shell
+          node -e '
+            const { execFileSync } = require("child_process");
+            const fs = require("fs"), pkg = process.env.PKG, T = process.env.T;
+            const view = (spec, ...f) => JSON.parse(execFileSync("npm", ["view", spec, ...f, "--json"], { encoding: "utf8" }) || "{}");
+            const want = view(`${pkg}@${T}`, "optionalDependencies");
+            const lock = JSON.parse(fs.readFileSync("package-lock.json", "utf8")).packages;
+            const sdks = Object.keys(lock).filter(k => (lock[k].name === pkg || k.endsWith(`node_modules/${pkg}`)) && lock[k].version === T);
+            const errors = [];
+            if (!sdks.length) errors.push(`no ${pkg}@${T} entry`);
+            const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+            const fields = ["os", "cpu", "libc"];
+            // One field per call: asked for several, npm view prints a bare value
+            // when only one of them is set.
+            const published = Object.fromEntries(Object.entries(want).map(([n, v]) =>
+              [n, Object.fromEntries(fields.map(f => { const x = view(`${n}@${v}`, f); return [f, Array.isArray(x) ? x : undefined]; }))]));
+            for (const sdk of sdks) {
+              const got = lock[sdk].optionalDependencies || {};
+              if (!same(Object.keys(got).sort(), Object.keys(want).sort()) || Object.keys(want).some(n => got[n] !== want[n]))
+                errors.push(`${sdk} optionalDependencies ${JSON.stringify(got)} != published ${JSON.stringify(want)}`);
+              for (const [name, version] of Object.entries(want)) {
+                // Resolve the way node does: nearest node_modules up from the SDK entry.
+                let dir = sdk, key;
+                for (;;) {
+                  key = `${dir}/node_modules/${name}`.replace(/^\//, "");
+                  if (lock[key] || !dir.includes("node_modules/")) break;
+                  dir = dir.slice(0, dir.lastIndexOf("/node_modules/"));
+                }
+                if (!lock[key]) key = `node_modules/${name}`;
+                const e = lock[key];
+                if (!e) { errors.push(`${name} is missing (needed by ${sdk})`); continue; }
+                if (e.version !== version) errors.push(`${key} is ${e.version}, want ${version}`);
+                if (e.optional !== true) errors.push(`${key} is not marked optional`);
+                for (const f of fields)
+                  if (!same(e[f], published[name][f])) errors.push(`${key} ${f} ${JSON.stringify(e[f])}, published ${JSON.stringify(published[name][f])}`);
+              }
+            }
+            if (errors.length) { console.error(`::error::package-lock.json does not pin ${pkg}@${T} with all its platform packages:\n  ${errors.join("\n  ")}`); process.exit(1); }
+            console.log(`${pkg}@${T} locked with all ${Object.keys(want).length} platform packages: ${Object.keys(want).join(", ")}`);
+          '
 
       - name: Open PR + arm auto-merge
         if: ${{ steps.v.outputs.changed == 'true' && steps.br.outputs.exists == 'false' }}
