@@ -63,6 +63,12 @@ Dependabot safety net.
    `"aitp": "npm:@agentidentitytrustprotocol/aitp@^x"`; `uv` runs
    `uv lock --upgrade-package aitp-sdk`), opens a PR, and arms auto-merge
    **unless the bump is breaking** (major, or a `0.x` minor).
+   For npm it waits for every optional platform package the SDK pins, not just
+   the SDK (they publish one by one, and a re-lock that runs early drops the
+   missing ones silently). It re-locks with npm 11, because npm 10 strips every
+   `libc` field from the lockfile. Before opening the PR it fails unless the
+   lock pins exactly the SDK's published `optionalDependencies`, each with its
+   published `os`/`cpu`/`libc` (aitp-ci#6; `tests/bump-consume-npm-lock.sh`).
 3. Missed dispatch → Dependabot's weekly `aitp-sdk` group opens the same PR later.
 
 ### Spec propagation (a new spec revision → its SHA-pinners)
