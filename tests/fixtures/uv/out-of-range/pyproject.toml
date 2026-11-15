@@ -1,0 +1,11 @@
+# aitp-playground's aitp-sdk pin before 733017b: 0.25.1 is outside the range.
+[project]
+name = "bump-consume-uv-fixture"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  # NOTE: depend on "aitp-sdk", NOT "aitp" (the comments must survive the bump).
+  #   [tool.uv.sources]
+  #   aitp-sdk = { path = "../aitp-rs/bindings/aitp-py" }
+  "aitp-sdk>=0.24.0,<0.25",
+]
