@@ -88,6 +88,15 @@ jobs:
             esac
           fi
           TARGET="${TARGET#v}"
+          # PyPI and uv.lock spell a pre-release the PEP 440 way: the release
+          # tag 1.0.0-rc.1 is 1.0.0rc1 there. Use that form from here on (wait
+          # URL, already-at check, branch, manifest floor, lock pin).
+          if [ "$ECO" = uv ]; then
+            TARGET=$(echo "$TARGET" | sed -E \
+              -e 's/([0-9])[-_.]?(alpha|a)[-_.]?([0-9]+)$/\1a\3/' \
+              -e 's/([0-9])[-_.]?(beta|b)[-_.]?([0-9]+)$/\1b\3/' \
+              -e 's/([0-9])[-_.]?(rc|c|pre|preview)[-_.]?([0-9]+)$/\1rc\3/')
+          fi
           case "$ECO" in
             npm)   CURRENT=$(node -e "const l=require('./package-lock.json').packages;const p=l['node_modules/'+process.env.PKG]||l['node_modules/'+process.env.PKG.split('/').pop()];process.stdout.write(p?p.version:'')" ) ;;
             cargo) CURRENT=$(awk -v p="$PKG" '$0=="name = \""p"\""{f=1} f&&/^version = /{v=$0;sub(/^version = "/,"",v);sub(/"$/,"",v);print v;exit}' Cargo.lock) ;;
@@ -185,7 +194,20 @@ jobs:
             uv)
               curl -fsSL https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
               export PATH="$HOME/.local/bin:$PATH"
-              uv lock --upgrade-package "$PKG" ;;
+              # Rewrite PKG's requirement in pyproject.toml to >=T,<next-breaking
+              # (0.x: the next minor; otherwise the next major), keeping any
+              # extras, then re-lock pinned to T. `uv lock --upgrade-package`
+              # alone never leaves the existing range, so an out-of-range
+              # release left the tree unchanged.
+              MAJ="${T%%.*}"; MIN=$(echo "$T" | cut -d. -f2 | sed 's/[^0-9].*//')
+              if [ "$MAJ" = "0" ]; then UB="0.$((MIN+1))"; else UB="$((MAJ+1))"; fi
+              PKG="$PKG" T="$T" UB="$UB" perl -i -pe '
+                my $p = quotemeta($ENV{PKG});
+                s/"$p(\[[^\]]*\])?\s*[<>=!~][^"]*"/"$ENV{PKG}$1>=$ENV{T},<$ENV{UB}"/;
+              ' pyproject.toml
+              grep -qE "\"$PKG(\[[^]]*\])?>=$T,<$UB\"" pyproject.toml \
+                || { echo "::error::no \"$PKG<specifier>\" requirement found in pyproject.toml"; exit 1; }
+              uv lock --upgrade-package "$PKG==$T" ;;
           esac
 
       # The lockfile must pin every optional platform package of PKG@T with the
@@ -251,6 +273,10 @@ jobs:
           set -euo pipefail
           git config user.name 'aitp-deps-bot[bot]'
           git config user.email '${{ steps.app.outputs.app-slug }}[bot]@users.noreply.github.com'
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "::notice::Nothing to commit: the manifest and lockfile already pin aitp $T. No PR opened."
+            exit 0
+          fi
           git checkout -b "$BR"
           git add -A
           git commit -m "chore(deps): bump aitp to $T"
